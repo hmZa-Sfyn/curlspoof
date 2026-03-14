@@ -1,0 +1,10 @@
+
+#### EXAMPLES 101:
+
+```sh
+go build -o curlspoof . && ./curlspoof -p firefox-125-linux -v -- curl 'https://httpbin.org/headers'
+```
+
+```sh
+./curlspoof -p firefox-125-linux -v -- curl 'https://www.amazon.com/?&tag=googleglobalp-20&ref=pd_sl_7nnedyywlk_e&adgrpid=159651196451&hvpone=&hvptwo=&hvadid=675114638367&hvpos=&hvnetw=g&hvrand=7653439671897328664&hvqmt=e&hvdev=c&hvdvcmdl=&hvlocint=&hvlocphy=1011081&hvtargid=kwd-10573980&hydadcr=2246_13468515'
+```
