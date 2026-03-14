@@ -29,6 +29,7 @@ type Config struct {
 	ProxyURL     string
 	InputFile    string // file with multiple curl commands (one per line / block)
 	Extract      string // extract mode: links, links-text, images, headings, …
+	Insecure     bool   // skip TLS cert verification
 }
 
 func defaultConfig() Config {
@@ -101,6 +102,8 @@ func main() {
 			cfg.FollowRedirs = false
 		case "--no-color":
 			cfg.NoColor = true
+		case "--insecure", "-k":
+			cfg.Insecure = true
 		case "--save-cookies":
 			cfg.SaveCookies = true
 		case "--list-profiles":

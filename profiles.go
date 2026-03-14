@@ -6,107 +6,213 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
-// ─── Profile ──────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type BrowserProfile struct {
 	Name    string
 	OS      string
 	Engine  string
 	UA      string
-	// Headers injected only when absent from the original request.
-	// Order matters: we preserve a realistic send-order.
-	Headers []KV
+	Headers []KV // sent in this exact order — order matters for fingerprinting
+
+	// Behavioural metadata (used to build dynamic headers)
+	ChromeMajor int    // non-zero for Chromium family
+	FFMajor     int    // non-zero for Gecko family
+	Platform    string // "Windows", "macOS", "Linux", "Android", "iOS"
+	Mobile      bool
 }
 
-// KV is an ordered key-value header pair.
 type KV struct{ K, V string }
 
-// InjectionResult records what was added.
 type InjectionResult struct {
 	Profile  *BrowserProfile
-	Injected []KV // headers that were actually added
+	Injected []KV
 }
 
-// ─── Profiles ─────────────────────────────────────────────────────────────────
+// ─── Version pools ────────────────────────────────────────────────────────────
+// Versions are randomised per-request to avoid static fingerprinting.
+
+// each entry: {major, minor-patch}
+var chromeBuilds = []struct{ major, full string }{
+	{"120", "120.0.6099.130"},
+	{"121", "121.0.6167.184"},
+	{"122", "122.0.6261.129"},
+	{"123", "123.0.6312.122"},
+	{"124", "124.0.6367.155"},
+	{"125", "125.0.6422.112"},
+}
+
+var firefoxBuilds = []struct{ major, rv string }{
+	{"122", "122.0"},
+	{"123", "123.0"},
+	{"124", "124.0"},
+	{"125", "125.0"},
+	{"126", "126.0"},
+}
+
+// Accept-Language: realistic pool including regional variants
+var acceptLanguagePools = map[string][]string{
+	"en-US": {
+		"en-US,en;q=0.9",
+		"en-US,en;q=0.8",
+		"en-US,en;q=0.9,fr;q=0.7",
+		"en-US,en;q=0.9,de;q=0.7",
+		"en-US,en;q=0.9,es;q=0.7",
+		"en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+		"en-US,en;q=0.5",
+	},
+	"en-GB": {
+		"en-GB,en;q=0.9",
+		"en-GB,en-US;q=0.9,en;q=0.8",
+		"en-GB,en;q=0.7",
+	},
+	"firefox": {
+		"en-US,en;q=0.5",
+		"en-US,en;q=0.7",
+		"en-GB,en;q=0.5",
+	},
+}
+
+// Referers: realistic entry points that look like organic traffic
+var refererPool = []string{
+	"https://www.google.com/",
+	"https://www.google.com/search?q=amazon+deals",
+	"https://www.google.com/search?q=buy+online",
+	"https://www.google.co.uk/search?q=shop",
+	"https://www.bing.com/search?q=amazon",
+	"https://www.bing.com/",
+	"https://duckduckgo.com/",
+	"https://www.reddit.com/r/deals/",
+	"https://news.ycombinator.com/",
+	"https://t.co/",
+	"https://www.facebook.com/",
+	"https://www.instagram.com/",
+	"", // no referer — direct navigation (common)
+}
+
+// Realistic viewport sizes for different device classes
+var viewportDesktop = []string{
+	"1920x1080", "1440x900", "1366x768",
+	"2560x1440", "1280x800", "1600x900",
+}
+var viewportMobile = []string{
+	"390x844", "414x896", "375x812",
+	"412x915", "393x873", "360x780",
+}
+
+// ─── Profile definitions ──────────────────────────────────────────────────────
+// Headers are listed in the EXACT order Chrome/Firefox sends them —
+// anti-bot systems check header order as part of fingerprinting.
 
 var Profiles = []BrowserProfile{
+
 	// ── Chrome 124 / Windows 10 ──────────────────────────────────────────────
+	// Exact order from Wireshark capture of Chrome 124.0.6367.155 on Win10
 	{
-		Name:   "chrome-124-win",
-		OS:     "Windows",
-		Engine: "Chromium",
-		UA:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+		Name: "chrome-124-win", OS: "Windows", Engine: "Chromium",
+		ChromeMajor: 124, Platform: "Windows",
+		UA: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.155 Safari/537.36",
 		Headers: []KV{
 			{"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
 			{"Accept-Encoding", "gzip, deflate, br, zstd"},
 			{"Accept-Language", "en-US,en;q=0.9"},
 			{"Cache-Control", "max-age=0"},
 			{"Connection", "keep-alive"},
-			{"Upgrade-Insecure-Requests", "1"},
+			{"Sec-Ch-Ua", `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`},
+			{"Sec-Ch-Ua-Mobile", "?0"},
+			{"Sec-Ch-Ua-Platform", `"Windows"`},
 			{"Sec-Fetch-Dest", "document"},
 			{"Sec-Fetch-Mode", "navigate"},
 			{"Sec-Fetch-Site", "none"},
 			{"Sec-Fetch-User", "?1"},
-			{"Sec-CH-UA", `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`},
-			{"Sec-CH-UA-Mobile", "?0"},
-			{"Sec-CH-UA-Platform", `"Windows"`},
+			{"Upgrade-Insecure-Requests", "1"},
+			{"User-Agent", ""},          // filled dynamically
 			{"Priority", "u=0, i"},
 		},
 	},
-	// ── Chrome 124 / macOS ───────────────────────────────────────────────────
+
+	// ── Chrome 124 / macOS Sonoma ─────────────────────────────────────────────
 	{
-		Name:   "chrome-124-mac",
-		OS:     "macOS",
-		Engine: "Chromium",
-		UA:     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+		Name: "chrome-124-mac", OS: "macOS", Engine: "Chromium",
+		ChromeMajor: 124, Platform: "macOS",
+		UA: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.155 Safari/537.36",
 		Headers: []KV{
 			{"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
 			{"Accept-Encoding", "gzip, deflate, br, zstd"},
 			{"Accept-Language", "en-US,en;q=0.9"},
 			{"Cache-Control", "max-age=0"},
 			{"Connection", "keep-alive"},
-			{"Upgrade-Insecure-Requests", "1"},
+			{"Sec-Ch-Ua", `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`},
+			{"Sec-Ch-Ua-Mobile", "?0"},
+			{"Sec-Ch-Ua-Platform", `"macOS"`},
 			{"Sec-Fetch-Dest", "document"},
 			{"Sec-Fetch-Mode", "navigate"},
 			{"Sec-Fetch-Site", "none"},
 			{"Sec-Fetch-User", "?1"},
-			{"Sec-CH-UA", `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`},
-			{"Sec-CH-UA-Mobile", "?0"},
-			{"Sec-CH-UA-Platform", `"macOS"`},
+			{"Upgrade-Insecure-Requests", "1"},
+			{"User-Agent", ""},
 			{"Priority", "u=0, i"},
 		},
 	},
-	// ── Chrome 124 / Android (Pixel 8) ───────────────────────────────────────
+
+	// ── Chrome 125 / Windows 11 ──────────────────────────────────────────────
 	{
-		Name:   "chrome-124-android",
-		OS:     "Android",
-		Engine: "Chromium",
-		UA:     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
+		Name: "chrome-125-win", OS: "Windows", Engine: "Chromium",
+		ChromeMajor: 125, Platform: "Windows",
+		UA: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.112 Safari/537.36",
 		Headers: []KV{
 			{"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
 			{"Accept-Encoding", "gzip, deflate, br, zstd"},
 			{"Accept-Language", "en-US,en;q=0.9"},
 			{"Cache-Control", "max-age=0"},
 			{"Connection", "keep-alive"},
-			{"Upgrade-Insecure-Requests", "1"},
+			{"Sec-Ch-Ua", `"Chromium";v="125", "Google Chrome";v="125", "Not-A.Brand";v="24"`},
+			{"Sec-Ch-Ua-Mobile", "?0"},
+			{"Sec-Ch-Ua-Platform", `"Windows"`},
 			{"Sec-Fetch-Dest", "document"},
 			{"Sec-Fetch-Mode", "navigate"},
 			{"Sec-Fetch-Site", "none"},
 			{"Sec-Fetch-User", "?1"},
-			{"Sec-CH-UA", `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`},
-			{"Sec-CH-UA-Mobile", "?1"},
-			{"Sec-CH-UA-Platform", `"Android"`},
+			{"Upgrade-Insecure-Requests", "1"},
+			{"User-Agent", ""},
+			{"Priority", "u=0, i"},
 		},
 	},
+
+	// ── Chrome 124 / Android Pixel 8 ─────────────────────────────────────────
+	{
+		Name: "chrome-124-android", OS: "Android", Engine: "Chromium",
+		ChromeMajor: 124, Platform: "Android", Mobile: true,
+		UA: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
+		Headers: []KV{
+			{"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
+			{"Accept-Encoding", "gzip, deflate, br, zstd"},
+			{"Accept-Language", "en-US,en;q=0.9"},
+			{"Cache-Control", "max-age=0"},
+			{"Connection", "keep-alive"},
+			{"Sec-Ch-Ua", `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`},
+			{"Sec-Ch-Ua-Mobile", "?1"},
+			{"Sec-Ch-Ua-Platform", `"Android"`},
+			{"Sec-Fetch-Dest", "document"},
+			{"Sec-Fetch-Mode", "navigate"},
+			{"Sec-Fetch-Site", "none"},
+			{"Sec-Fetch-User", "?1"},
+			{"Upgrade-Insecure-Requests", "1"},
+			{"User-Agent", ""},
+		},
+	},
+
 	// ── Firefox 125 / Windows ────────────────────────────────────────────────
+	// Firefox header order from Wireshark capture of FF 125.0 on Win10
 	{
-		Name:   "firefox-125-win",
-		OS:     "Windows",
-		Engine: "Gecko",
-		UA:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+		Name: "firefox-125-win", OS: "Windows", Engine: "Gecko",
+		FFMajor: 125, Platform: "Windows",
+		UA: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
 		Headers: []KV{
+			{"User-Agent", ""},
 			{"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"},
 			{"Accept-Language", "en-US,en;q=0.5"},
 			{"Accept-Encoding", "gzip, deflate, br"},
@@ -116,16 +222,39 @@ var Profiles = []BrowserProfile{
 			{"Sec-Fetch-Mode", "navigate"},
 			{"Sec-Fetch-Site", "none"},
 			{"Sec-Fetch-User", "?1"},
+			{"Priority", "u=1"},
 			{"TE", "trailers"},
 		},
 	},
+
+	// ── Firefox 126 / Windows ────────────────────────────────────────────────
+	{
+		Name: "firefox-126-win", OS: "Windows", Engine: "Gecko",
+		FFMajor: 126, Platform: "Windows",
+		UA: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+		Headers: []KV{
+			{"User-Agent", ""},
+			{"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"},
+			{"Accept-Language", "en-US,en;q=0.5"},
+			{"Accept-Encoding", "gzip, deflate, br"},
+			{"Connection", "keep-alive"},
+			{"Upgrade-Insecure-Requests", "1"},
+			{"Sec-Fetch-Dest", "document"},
+			{"Sec-Fetch-Mode", "navigate"},
+			{"Sec-Fetch-Site", "none"},
+			{"Sec-Fetch-User", "?1"},
+			{"Priority", "u=1"},
+			{"TE", "trailers"},
+		},
+	},
+
 	// ── Firefox 125 / Linux ──────────────────────────────────────────────────
 	{
-		Name:   "firefox-125-linux",
-		OS:     "Linux",
-		Engine: "Gecko",
-		UA:     "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+		Name: "firefox-125-linux", OS: "Linux", Engine: "Gecko",
+		FFMajor: 125, Platform: "Linux",
+		UA: "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
 		Headers: []KV{
+			{"User-Agent", ""},
 			{"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"},
 			{"Accept-Language", "en-US,en;q=0.5"},
 			{"Accept-Encoding", "gzip, deflate, br"},
@@ -135,114 +264,175 @@ var Profiles = []BrowserProfile{
 			{"Sec-Fetch-Mode", "navigate"},
 			{"Sec-Fetch-Site", "none"},
 			{"Sec-Fetch-User", "?1"},
+			{"Priority", "u=1"},
 			{"TE", "trailers"},
 		},
 	},
-	// ── Safari 17 / macOS ────────────────────────────────────────────────────
+
+	// ── Safari 17.4 / macOS Sonoma ───────────────────────────────────────────
+	// Safari sends fewer headers and in a different order
 	{
-		Name:   "safari-17-mac",
-		OS:     "macOS",
-		Engine: "WebKit",
-		UA:     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+		Name: "safari-17-mac", OS: "macOS", Engine: "WebKit",
+		Platform: "macOS",
+		UA: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
 		Headers: []KV{
+			{"User-Agent", ""},
 			{"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
 			{"Accept-Language", "en-US,en;q=0.9"},
 			{"Accept-Encoding", "gzip, deflate, br"},
 			{"Connection", "keep-alive"},
-			{"Upgrade-Insecure-Requests", "1"},
 		},
 	},
-	// ── Safari 17 / iOS ──────────────────────────────────────────────────────
+
+	// ── Safari 17 / iPhone iOS 17.4 ──────────────────────────────────────────
 	{
-		Name:   "safari-17-ios",
-		OS:     "iOS",
-		Engine: "WebKit",
-		UA:     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
+		Name: "safari-17-ios", OS: "iOS", Engine: "WebKit",
+		Platform: "iOS", Mobile: true,
+		UA: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
 		Headers: []KV{
+			{"User-Agent", ""},
 			{"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
 			{"Accept-Language", "en-US,en;q=0.9"},
 			{"Accept-Encoding", "gzip, deflate, br"},
 			{"Connection", "keep-alive"},
-			{"Upgrade-Insecure-Requests", "1"},
 		},
 	},
+
 	// ── Edge 124 / Windows ───────────────────────────────────────────────────
 	{
-		Name:   "edge-124-win",
-		OS:     "Windows",
-		Engine: "Chromium",
-		UA:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+		Name: "edge-124-win", OS: "Windows", Engine: "Chromium",
+		ChromeMajor: 124, Platform: "Windows",
+		UA: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
 		Headers: []KV{
 			{"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
 			{"Accept-Encoding", "gzip, deflate, br, zstd"},
 			{"Accept-Language", "en-US,en;q=0.9"},
 			{"Cache-Control", "max-age=0"},
 			{"Connection", "keep-alive"},
-			{"Upgrade-Insecure-Requests", "1"},
+			{"Sec-Ch-Ua", `"Microsoft Edge";v="124", "Chromium";v="124", "Not-A.Brand";v="99"`},
+			{"Sec-Ch-Ua-Mobile", "?0"},
+			{"Sec-Ch-Ua-Platform", `"Windows"`},
 			{"Sec-Fetch-Dest", "document"},
 			{"Sec-Fetch-Mode", "navigate"},
 			{"Sec-Fetch-Site", "none"},
 			{"Sec-Fetch-User", "?1"},
-			{"Sec-CH-UA", `"Microsoft Edge";v="124", "Chromium";v="124", "Not-A.Brand";v="99"`},
-			{"Sec-CH-UA-Mobile", "?0"},
-			{"Sec-CH-UA-Platform", `"Windows"`},
+			{"Upgrade-Insecure-Requests", "1"},
+			{"User-Agent", ""},
 			{"Priority", "u=0, i"},
 		},
 	},
 }
 
-// ─── UA version pools ─────────────────────────────────────────────────────────
+// ─── Dynamic header generators ────────────────────────────────────────────────
 
-var chromeVersions = []string{"120", "121", "122", "123", "124", "125"}
-var firefoxVersions = []string{"122.0", "123.0", "124.0", "125.0"}
-var edgeVersions = []string{"120.0.0.0", "121.0.0.0", "122.0.0.0", "123.0.0.0", "124.0.0.0"}
+// buildSecCHUA returns consistent Sec-CH-UA / Sec-CH-UA-Full-Version-List
+// values that match the actual UA version being used.
+func buildSecCHUA(profile *BrowserProfile, chromeBuild, edgeBuild string) map[string]string {
+	out := map[string]string{}
+	if profile.ChromeMajor == 0 {
+		return out
+	}
 
-var acceptLanguages = []string{
-	"en-US,en;q=0.9",
-	"en-GB,en;q=0.9",
-	"en-US,en;q=0.9,fr;q=0.8",
-	"en-US,en;q=0.9,de;q=0.8",
-	"en-US,en;q=0.5",
-	"en-CA,en;q=0.9,fr-CA;q=0.8",
-	"en-US,en;q=0.9,es;q=0.8",
+	major := chromeBuild // e.g. "124"
+	full := ""
+	for _, b := range chromeBuilds {
+		if b.major == major {
+			full = b.full
+			break
+		}
+	}
+	if full == "" {
+		full = major + ".0.0.0"
+	}
+
+	isEdge := edgeBuild != ""
+
+	if isEdge {
+		out["Sec-Ch-Ua"] = fmt.Sprintf(`"Microsoft Edge";v="%s", "Chromium";v="%s", "Not-A.Brand";v="99"`, major, major)
+		out["Sec-Ch-Ua-Full-Version-List"] = fmt.Sprintf(`"Microsoft Edge";v="%s", "Chromium";v="%s", "Not-A.Brand";v="99.0.0.0"`, full, full)
+	} else {
+		out["Sec-Ch-Ua"] = fmt.Sprintf(`"Chromium";v="%s", "Google Chrome";v="%s", "Not-A.Brand";v="99"`, major, major)
+		out["Sec-Ch-Ua-Full-Version-List"] = fmt.Sprintf(`"Chromium";v="%s", "Google Chrome";v="%s", "Not-A.Brand";v="99.0.0.0"`, full, full)
+	}
+	out["Sec-Ch-Ua-Arch"] = `"x86"`
+	out["Sec-Ch-Ua-Bitness"] = `"64"`
+	out["Sec-Ch-Ua-Full-Version"] = `"` + full + `"`
+
+	if profile.Mobile {
+		out["Sec-Ch-Ua-Mobile"] = "?1"
+		out["Sec-Ch-Ua-Arch"] = `""`
+	} else {
+		out["Sec-Ch-Ua-Mobile"] = "?0"
+	}
+	out["Sec-Ch-Ua-Platform"] = `"` + profile.Platform + `"`
+	switch profile.Platform {
+	case "Windows":
+		out["Sec-Ch-Ua-Platform-Version"] = `"15.0.0"` // Windows 11
+	case "macOS":
+		out["Sec-Ch-Ua-Platform-Version"] = `"14.4.1"`
+	case "Android":
+		out["Sec-Ch-Ua-Platform-Version"] = `"14.0.0"`
+		out["Sec-Ch-Ua-Model"] = `"Pixel 8"`
+		out["Sec-Ch-Ua-Arch"] = `""`
+		out["Sec-Ch-Ua-Bitness"] = `"32"`
+	}
+	return out
 }
 
-// ─── Referer pools (realistic entry points) ───────────────────────────────────
-
-var referers = []string{
-	"https://www.google.com/",
-	"https://www.google.com/search?q=site",
-	"https://duckduckgo.com/",
-	"https://www.bing.com/search?q=site",
-	"https://t.co/",
-	"https://www.reddit.com/",
+// randomLang picks a locale appropriate for the profile's engine.
+func randomLang(profile *BrowserProfile) string {
+	pool := acceptLanguagePools["en-US"]
+	if profile.FFMajor > 0 {
+		pool = acceptLanguagePools["firefox"]
+	} else if profile.Platform == "macOS" || profile.Platform == "iOS" {
+		pool = acceptLanguagePools["en-GB"]
+		if rand.Intn(3) != 0 {
+			pool = acceptLanguagePools["en-US"]
+		}
+	}
+	return pool[rand.Intn(len(pool))]
 }
 
-// ─── Mutate UA version ────────────────────────────────────────────────────────
+// pickReferer returns a realistic referer, sometimes empty (direct load).
+func pickReferer() string {
+	return refererPool[rand.Intn(len(refererPool))]
+}
 
-func mutateUA(ua string) string {
-	bump := func(ua, marker string, pool []string) string {
-		idx := strings.Index(ua, marker)
-		if idx < 0 {
-			return ua
+// ─── UA version mutation ─────────────────────────────────────────────────────
+
+func mutateUA(ua string, profile *BrowserProfile) (string, string) {
+	// returns (mutated UA, major version string)
+	if profile.ChromeMajor > 0 {
+		build := chromeBuilds[rand.Intn(len(chromeBuilds))]
+		// Replace Chrome/xxx.x.xxxx.xxx
+		ua = replaceVersionAfter(ua, "Chrome/", build.full)
+		// For Edge, also replace Edg/
+		if strings.Contains(ua, "Edg/") {
+			ua = replaceVersionAfter(ua, "Edg/", build.major+".0.0.0")
 		}
-		start := idx + len(marker)
-		end := start
-		for end < len(ua) && (ua[end] >= '0' && ua[end] <= '9' || ua[end] == '.') {
-			end++
-		}
-		return ua[:start] + pool[rand.Intn(len(pool))] + ua[end:]
+		return ua, build.major
 	}
-	if strings.Contains(ua, "Chrome/") {
-		ua = bump(ua, "Chrome/", chromeVersions)
+	if profile.FFMajor > 0 {
+		build := firefoxBuilds[rand.Intn(len(firefoxBuilds))]
+		// Replace rv:xxx.0 and Firefox/xxx.0
+		ua = strings.ReplaceAll(ua, fmt.Sprintf("rv:%d.0", profile.FFMajor), "rv:"+build.rv)
+		ua = replaceVersionAfter(ua, "Firefox/", build.rv)
+		return ua, build.major
 	}
-	if strings.Contains(ua, "Edg/") {
-		ua = bump(ua, "Edg/", edgeVersions)
+	return ua, ""
+}
+
+func replaceVersionAfter(s, marker, newVer string) string {
+	idx := strings.Index(s, marker)
+	if idx < 0 {
+		return s
 	}
-	if strings.Contains(ua, "Firefox/") {
-		ua = bump(ua, "Firefox/", firefoxVersions)
+	start := idx + len(marker)
+	end := start
+	for end < len(s) && (s[end] >= '0' && s[end] <= '9' || s[end] == '.') {
+		end++
 	}
-	return ua
+	return s[:start] + newVer + s[end:]
 }
 
 // ─── pickProfile ─────────────────────────────────────────────────────────────
@@ -254,94 +444,133 @@ func pickProfile(name string) *BrowserProfile {
 	}
 	for i := range Profiles {
 		if Profiles[i].Name == name {
-			return &Profiles[i]
+			cp := Profiles[i]
+			return &cp
 		}
 	}
-	fmt.Fprintf(os.Stderr, "%s⚠ unknown profile '%s', using random%s\n", yellow, name, reset)
+	fmt.Fprintf(os.Stderr, "%s⚠  unknown profile '%s', using random%s\n", yellow, name, reset)
 	p := Profiles[rand.Intn(len(Profiles))]
 	return &p
 }
 
 // ─── buildSpoofHeaders ────────────────────────────────────────────────────────
-// Injects browser fingerprint headers into cr.
-// Existing headers in cr are NEVER overwritten.
+// Applies full browser fingerprint to cr.
+// Existing headers in cr are NEVER overwritten — spoof only fills gaps.
 
 func buildSpoofHeaders(cr *CurlRequest, profileName string) InjectionResult {
-	p := pickProfile(profileName)
+	rand.Seed(time.Now().UnixNano()) //nolint
 
-	// clone profile and mutate UA version
-	profile := *p
-	profile.UA = mutateUA(profile.UA)
+	profile := pickProfile(profileName)
+
+	// 1. Mutate UA version (randomised build number)
+	mutatedUA, chromeMajor := mutateUA(profile.UA, profile)
+	profile.UA = mutatedUA
+
+	// 2. Build dynamic Sec-CH-UA headers matching the UA version
+	var edgeBuild string
+	if strings.Contains(mutatedUA, "Edg/") {
+		edgeBuild = chromeMajor
+	}
+	secCH := buildSecCHUA(profile, chromeMajor, edgeBuild)
 
 	var injected []KV
 
+	// set-if-missing helper — also records what was injected
 	set := func(k, v string) {
+		if v == "" {
+			return
+		}
 		if !cr.hasHeader(k) {
 			cr.setHeader(k, v)
 			injected = append(injected, KV{k, v})
 		}
 	}
 
-	// 1. User-Agent (most critical)
-	set("User-Agent", profile.UA)
-
-	// 2. All profile-specific headers
+	// 3. Inject headers in the profile's canonical order
 	for _, kv := range profile.Headers {
-		set(kv.K, kv.V)
+		v := kv.V
+		// Placeholders filled dynamically
+		switch kv.K {
+		case "User-Agent":
+			v = mutatedUA
+		case "Accept-Language":
+			if v == "" {
+				v = randomLang(profile)
+			}
+		case "Sec-Ch-Ua":
+			if dyn, ok := secCH["Sec-Ch-Ua"]; ok && v != "" {
+				v = dyn
+			}
+		case "Sec-Ch-Ua-Mobile":
+			if dyn, ok := secCH["Sec-Ch-Ua-Mobile"]; ok {
+				v = dyn
+			}
+		case "Sec-Ch-Ua-Platform":
+			if dyn, ok := secCH["Sec-Ch-Ua-Platform"]; ok {
+				v = dyn
+			}
+		}
+		set(kv.K, v)
 	}
 
-	// 3. Randomise Accept-Language if not already present
-	set("Accept-Language", acceptLanguages[rand.Intn(len(acceptLanguages))])
+	// 4. Extended Sec-CH-UA hints (only sent on Chromium; not in base list)
+	if profile.ChromeMajor > 0 {
+		for _, k := range []string{
+			"Sec-Ch-Ua-Full-Version-List",
+			"Sec-Ch-Ua-Full-Version",
+			"Sec-Ch-Ua-Arch",
+			"Sec-Ch-Ua-Bitness",
+			"Sec-Ch-Ua-Platform-Version",
+			"Sec-Ch-Ua-Model",
+		} {
+			if v, ok := secCH[k]; ok {
+				set(k, v)
+			}
+		}
+	}
 
-	// 4. Referer — realistic entry point
-	set("Referer", referers[rand.Intn(len(referers))])
+	// 5. Accept-Language (fill if profile didn't include it)
+	set("Accept-Language", randomLang(profile))
 
-	// 5. DNT (1-in-3 browsers send it)
-	if rand.Intn(3) == 0 {
+	// 6. Referer (realistic entry point — not always present)
+	ref := pickReferer()
+	if ref != "" {
+		set("Referer", ref)
+	}
+
+	// 7. DNT — ~30% of browsers send it
+	if rand.Intn(10) < 3 {
 		set("DNT", "1")
 	}
 
-	// 6. Chromium: randomise Sec-CH-UA version to match UA
-	if strings.Contains(profile.UA, "Chrome/") {
-		ver := extractChromeVersion(profile.UA)
-		if ver != "" {
-			chUA := fmt.Sprintf(`"Chromium";v="%s", "Google Chrome";v="%s", "Not-A.Brand";v="99"`, ver, ver)
-			// override our own injected value to keep version consistent
-			cr.Headers[http.CanonicalHeaderKey("Sec-CH-UA")] = chUA
+	// 8. Save-Data — rare but real (~2% of mobile)
+	if profile.Mobile && rand.Intn(50) == 0 {
+		set("Save-Data", "on")
+	}
+
+	// 9. Viewport-Width hint (Chromium sends this when server opts in)
+	if profile.ChromeMajor > 0 {
+		pool := viewportDesktop
+		if profile.Mobile {
+			pool = viewportMobile
+		}
+		vp := pool[rand.Intn(len(pool))]
+		parts := strings.SplitN(vp, "x", 2)
+		if len(parts) == 2 {
+			set("Viewport-Width", parts[0])
 		}
 	}
-	if strings.Contains(profile.UA, "Edg/") {
-		ver := extractEdgeVersion(profile.UA)
-		if ver != "" {
-			chUA := fmt.Sprintf(`"Microsoft Edge";v="%s", "Chromium";v="%s", "Not-A.Brand";v="99"`, ver, ver)
-			cr.Headers[http.CanonicalHeaderKey("Sec-CH-UA")] = chUA
-		}
-	}
 
-	return InjectionResult{Profile: &profile, Injected: injected}
+	// 10. X-Forwarded-For randomisation is intentionally NOT done here —
+	//     adding a fake XFF looks more suspicious than omitting it.
+
+	return InjectionResult{Profile: profile, Injected: injected}
 }
 
-// ─── Version extractors ───────────────────────────────────────────────────────
+// ─── canonicalHeaderKey wraps net/http for external use ──────────────────────
 
-func extractChromeVersion(ua string) string {
-	return extractVersionAfter(ua, "Chrome/")
-}
-
-func extractEdgeVersion(ua string) string {
-	return extractVersionAfter(ua, "Edg/")
-}
-
-func extractVersionAfter(s, marker string) string {
-	idx := strings.Index(s, marker)
-	if idx < 0 {
-		return ""
-	}
-	start := idx + len(marker)
-	end := start
-	for end < len(s) && (s[end] >= '0' && s[end] <= '9') {
-		end++
-	}
-	return s[start:end]
+func canonicalKey(k string) string {
+	return http.CanonicalHeaderKey(k)
 }
 
 // ─── listProfiles ─────────────────────────────────────────────────────────────
@@ -349,11 +578,15 @@ func extractVersionAfter(s, marker string) string {
 func listProfiles() {
 	lines := make([]string, 0, len(Profiles))
 	for _, p := range Profiles {
+		tag := ""
+		if p.Mobile {
+			tag = yellow + " mobile" + reset
+		}
 		lines = append(lines, fmt.Sprintf(
-			"%s%-22s%s %s%-8s%s %s%s%s",
+			"%s%-22s%s %s%-10s%s %s%s%s%s",
 			cyan, p.Name, reset,
-			yellow, p.Engine, reset,
-			dim, truncate(p.UA, 60), reset,
+			green, p.Engine, reset,
+			dim, truncate(p.UA, 56), reset, tag,
 		))
 	}
 	printBox("Available profiles", lines)
