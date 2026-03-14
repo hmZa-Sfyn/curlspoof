@@ -67,10 +67,9 @@ func printBox(title string, lines []string) {
 	if pad < 1 {
 		pad = 1
 	}
-
 	fmt.Println("╭─ " + bold + cyan + title + reset + " " + strings.Repeat("─", pad) + "╮")
 	if len(lines) == 0 {
-		sp := w - 2 - 7
+		sp := w - 9
 		if sp < 0 {
 			sp = 0
 		}
@@ -109,30 +108,23 @@ func statusColor(code int) string {
 // ─── Banner ───────────────────────────────────────────────────────────────────
 
 func printBanner() {
-	fmt.Printf("\n%s%s curlspoof%s %sv%s%s\n\n",
-		bold, cyan, reset, dim, version, reset)
+	fmt.Printf("\n%s%s curlspoof%s %sv%s%s\n\n", bold, cyan, reset, dim, version, reset)
 }
 
-// ─── Mini spoof line (non-verbose) ────────────────────────────────────────────
+// ─── Mini spoof line ──────────────────────────────────────────────────────────
 
 func printMini(p *BrowserProfile) {
 	fmt.Printf("%s◈ profile  %s%s%-22s%s  %s%s%s\n",
-		purple, reset,
-		cyan, p.Name, reset,
-		dim, truncate(p.UA, 55), reset,
-	)
+		purple, reset, cyan, p.Name, reset, dim, truncate(p.UA, 55), reset)
 }
 
 // ─── Verbose box ─────────────────────────────────────────────────────────────
 
 func printVerboseBox(cr *CurlRequest, inj InjectionResult) {
 	printMini(inj.Profile)
-
-	// original headers box
 	origLines := make([]string, 0, len(cr.headerOrder))
 	for _, k := range cr.headerOrder {
 		v := cr.Headers[k]
-		// mark injected headers with a symbol
 		injected := false
 		for _, kv := range inj.Injected {
 			if kv.K == k {
@@ -141,18 +133,13 @@ func printVerboseBox(cr *CurlRequest, inj InjectionResult) {
 			}
 		}
 		if injected {
-			origLines = append(origLines, fmt.Sprintf(
-				"%s+%s %s%s%s: %s%s%s",
-				green, reset, cyan, k, reset, dim, truncate(v, 60), reset,
-			))
+			origLines = append(origLines, fmt.Sprintf("%s+%s %s%s%s: %s%s%s",
+				green, reset, cyan, k, reset, dim, truncate(v, 60), reset))
 		} else {
-			origLines = append(origLines, fmt.Sprintf(
-				"  %s%s%s: %s%s%s",
-				cyan, k, reset, dim, truncate(v, 60), reset,
-			))
+			origLines = append(origLines, fmt.Sprintf("  %s%s%s: %s%s%s",
+				cyan, k, reset, dim, truncate(v, 60), reset))
 		}
 	}
-
 	printBox(fmt.Sprintf("Final headers  (%s+%s = injected)", green, reset), origLines)
 }
 
@@ -163,12 +150,10 @@ func printDryRun(cr *CurlRequest) {
 	fmt.Printf("%scurl%s -X %s%s%s \\\n", cyan, reset, yellow, cr.Method, reset)
 	fmt.Printf("  %s'%s'%s", green, cr.URL, reset)
 	for _, k := range cr.headerOrder {
-		v := cr.Headers[k]
-		fmt.Printf(" \\\n  -H %s'%s: %s'%s", dim, k, v, reset)
+		fmt.Printf(" \\\n  -H %s'%s: %s'%s", dim, k, cr.Headers[k], reset)
 	}
 	if cr.Body != "" {
-		bodyDisplay := truncate(cr.Body, 120)
-		fmt.Printf(" \\\n  -d %s'%s'%s", dim, bodyDisplay, reset)
+		fmt.Printf(" \\\n  -d %s'%s'%s", dim, truncate(cr.Body, 120), reset)
 	}
 	fmt.Printf("\n\n")
 }
@@ -176,89 +161,95 @@ func printDryRun(cr *CurlRequest) {
 // ─── Usage ────────────────────────────────────────────────────────────────────
 
 func printUsage() {
-	fmt.Fprintf(os.Stdout, `
-%s%scurlspoof%s  v%s  — inject a browser fingerprint into any curl command
-
-%sUsage:%s
-  curlspoof [options] -- curl -X GET 'https://…' -H '…'
-  curlspoof [options] "curl -X GET 'https://…' -H '…'"
-  echo "curl …" | curlspoof [options]
-  curlspoof -f requests.txt [options]        %s# batch — one curl per block%s
-
-%sOptions:%s
-  %s-p%s / %s--profile%s <n>    browser profile to use       %s(default: random)%s
-  %s-t%s / %s--threads%s  <n>   worker threads for batch     %s(default: 1)%s
-       %s--delay%s    <ms>   wait N ms before firing      %s(default: 0)%s
-       %s--jitter%s   <ms>   ± random jitter on delay
-       %s--timeout%s  <s>    request timeout in seconds   %s(default: 30)%s
-       %s--retries%s  <n>    retry N times on failure     %s(default: 0)%s
-       %s--proxy%s    <url>  HTTP/SOCKS proxy URL
-  %s-o%s / %s--output%s   <f>   save response body to file
-  %s-f%s / %s--file%s     <f>   read curl command(s) from file
-  %s-n%s / %s--dry-run%s        print final curl, do not fire
-  %s-v%s / %s--verbose%s        show injected headers
-       %s--no-redirects%s       do not follow redirects
-       %s--no-color%s           disable ANSI colours
-       %s--save-cookies%s       persist cookies across batch
-       %s--list-profiles%s      list all browser profiles
-       %s--version%s
-       %s--help%s
-
-%sProfiles:%s
-`,
-		bold, cyan, reset, version,
-		bold, reset,
-		dim, reset,
-		bold, reset,
-		cyan, reset, cyan, reset, dim, reset,
-		cyan, reset, cyan, reset, dim, reset,
-		cyan, reset, dim, reset,
-		cyan, reset,
-		cyan, reset, dim, reset,
-		cyan, reset, dim, reset,
-		cyan, reset,
-		cyan, reset, cyan, reset,
-		cyan, reset, cyan, reset,
-		cyan, reset, cyan, reset,
-		cyan, reset,
-		cyan, reset,
-		cyan, reset,
-		cyan, reset,
-		cyan, reset,
-		cyan, reset,
-		bold, reset,
-	)
-
-	for _, p := range Profiles {
-		fmt.Printf("  %s%-22s%s %s%-10s%s %s%s%s\n",
-			cyan, p.Name, reset,
-			yellow, p.Engine, reset,
-			dim, truncate(p.UA, 58), reset)
+	w := os.Stdout
+	nl := func() { fmt.Fprintln(w) }
+	h := func(s string) { fmt.Fprintln(w, bold+s+reset) }
+	opt := func(flag, desc, def string) {
+		suf := ""
+		if def != "" {
+			suf = fmt.Sprintf("  %s(default: %s)%s", dim, def, reset)
+		}
+		fmt.Fprintf(w, "  %s%-28s%s %s%s\n", cyan, flag, reset, desc, suf)
 	}
+	ext := func(mode, desc string) {
+		fmt.Fprintf(w, "  %s%-16s%s %s\n", cyan, mode, reset, desc)
+	}
+	ex := func(s string) { fmt.Fprintln(w, "  "+s) }
 
-	fmt.Printf(`
-%sExamples:%s
-  # basic spoof
-  curlspoof -- curl 'https://www.amazon.com'
+	nl()
+	fmt.Fprintf(w, "%s%scurlspoof%s  v%s  — inject a browser fingerprint into any curl command\n",
+		bold, cyan, reset, version)
+	nl()
 
-  # your exact supabase request — with spoof added automatically
-  curlspoof -- curl -X GET \
-    'https://project.supabase.co/rest/v1/table?select=*' \
-    -H 'apikey: YOUR_KEY' \
-    -H 'Authorization: Bearer YOUR_TOKEN' \
-    -H 'Accept: application/json'
+	h("Usage:")
+	ex("curlspoof [options] -- curl -X GET 'https://…' -H '…'")
+	ex("curlspoof [options] \"curl -X GET 'https://…' -H '…'\"")
+	ex("echo \"curl …\" | curlspoof [options]")
+	ex(fmt.Sprintf("curlspoof -f requests.txt [options]    %s# batch — one curl per block%s", dim, reset))
+	nl()
 
-  # pin Firefox, see what was injected
-  curlspoof -p firefox-125-linux -v -- curl 'https://httpbin.org/headers'
+	h("Options:")
+	opt("-p / --profile <n>",   "browser profile",              "random")
+	opt("-t / --threads <n>",   "worker threads for batch",     "1")
+	opt("--delay <ms>",          "wait N ms before firing",      "0")
+	opt("--jitter <ms>",         "± random ms on top of delay",  "")
+	opt("--timeout <s>",         "request timeout in seconds",   "30")
+	opt("--retries <n>",         "retry N times on failure",     "0")
+	opt("--proxy <url>",         "HTTP/SOCKS proxy URL",         "")
+	opt("-o / --output <file>",  "save body to file",            "")
+	opt("-f / --file <file>",    "read curl commands from file", "")
+	opt("-n / --dry-run",        "print final curl, don't fire", "")
+	opt("-v / --verbose",        "show injected headers",        "")
+	opt("-e / --extract <mode>", "extract elements from HTML",   "")
+	opt("--no-redirects",        "do not follow redirects",      "")
+	opt("--no-color",            "disable ANSI colours",         "")
+	opt("--save-cookies",        "persist cookies across batch", "")
+	opt("--list-profiles",       "list all browser profiles",    "")
+	opt("--version",             "",                             "")
+	opt("--help",                "",                             "")
+	nl()
 
-  # dry-run: print the final curl command without firing
-  curlspoof -n -- curl -H 'Accept: application/json' 'https://example.com'
+	h("Extract modes  (-e / --extract):")
+	ext("links",      "all <a href> URLs (deduplicated)")
+	ext("links-text", "<a href> + visible anchor text, side by side")
+	ext("images",     "all <img src> URLs")
+	ext("headings",   "all <h1>–<h6> text content")
+	ext("title",      "<title> tag content")
+	ext("text",       "visible text, tags stripped")
+	ext("forms",      "<form> actions and every input/select/textarea field")
+	ext("scripts",    "all <script src> values")
+	ext("meta",       "all <meta name/property + content> pairs")
+	nl()
 
-  # batch: 4 threads, 200-500ms jitter delay between requests
-  curlspoof -f requests.txt -t 4 --delay 200 --jitter 300
+	h("Profiles:")
+	for _, pr := range Profiles {
+		fmt.Fprintf(w, "  %s%-22s%s %s%-10s%s %s%s%s\n",
+			cyan, pr.Name, reset,
+			yellow, pr.Engine, reset,
+			dim, truncate(pr.UA, 58), reset)
+	}
+	nl()
 
-  # pipe
-  echo "curl -X DELETE 'https://api.example.com/item/1' -H 'Auth: Bearer X'" | curlspoof
-
-`, bold, reset)
+	h("Examples:")
+	ex("# extract all links from a page")
+	ex("curlspoof -e links -- curl 'https://news.ycombinator.com'")
+	nl()
+	ex("# links + anchor text from Amazon")
+	ex("curlspoof -e links-text -- curl 'https://www.amazon.com'")
+	nl()
+	ex("# basic spoof, no extraction")
+	ex("curlspoof -- curl 'https://www.amazon.com'")
+	nl()
+	ex("# pin Firefox + see what was injected")
+	ex("curlspoof -p firefox-125-linux -v -- curl 'https://httpbin.org/headers'")
+	nl()
+	ex("# dry-run")
+	ex("curlspoof -n -- curl -H 'Accept: application/json' 'https://example.com'")
+	nl()
+	ex("# batch: 4 threads, 200–500 ms jitter")
+	ex("curlspoof -f requests.txt -t 4 --delay 200 --jitter 300")
+	nl()
+	ex("# pipe")
+	ex("echo \"curl 'https://httpbin.org/get'\" | curlspoof -e links")
+	nl()
 }

@@ -28,6 +28,7 @@ type Config struct {
 	SaveCookies  bool
 	ProxyURL     string
 	InputFile    string // file with multiple curl commands (one per line / block)
+	Extract      string // extract mode: links, links-text, images, headings, …
 }
 
 func defaultConfig() Config {
@@ -90,6 +91,8 @@ func main() {
 			cfg.OutputFile = nextArg()
 		case "--file", "-f":
 			cfg.InputFile = nextArg()
+		case "--extract", "-e":
+			cfg.Extract = nextArg()
 		case "--dry-run", "-n":
 			cfg.DryRun = true
 		case "--verbose", "-v":
@@ -253,7 +256,11 @@ func runSingle(raw string, cfg Config) {
 		os.Exit(1)
 	}
 
-	printResponse(resp, cfg.OutputFile)
+	if cfg.Extract != "" {
+		extract(cfg.Extract, string(resp.Body), resp.URL)
+	} else {
+		printResponse(resp, cfg.OutputFile)
+	}
 }
 
 // captureRun runs a single request and returns its output as a string (for batch).
